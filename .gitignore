@@ -1,2 +1,3 @@
 wesad_cwt/cwtFiles/
 wesad_cwt/wesad_dataset.npz
+wesad_cwt/*.npz
