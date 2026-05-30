@@ -2,7 +2,7 @@ import numpy as np
 from sklearn.model_selection import GroupShuffleSplit
 
 # ── LOAD DATASET ─────────────────────────────────────────────────────────────
-data = np.load("ubfc_cwt/ubfc_dataset.npz")
+data = np.load("ubfc_cwtSINGLE/ubfc_datasetSINGLE.npz")
 
 X = data["X"]
 y = data["y"]
@@ -98,7 +98,7 @@ print("class counts:", np.bincount(y_test))
 
 # ── OPTIONAL: SAVE SPLITS ───────────────────────────────────────────────────
 np.savez_compressed(
-    "ubfc_cwt/train.npz",
+    "ubfc_cwt/ubfc_trainSINGLE.npz",
     X=X_train,
     y=y_train,
     subjects=subjects_train,
@@ -107,7 +107,7 @@ np.savez_compressed(
 )
 
 np.savez_compressed(
-    "ubfc_cwt/val.npz",
+    "ubfc_cwt/ubc_valSINGLE.npz",
     X=X_val,
     y=y_val,
     subjects=subjects_val,
@@ -116,7 +116,7 @@ np.savez_compressed(
 )
 
 np.savez_compressed(
-    "ubfc_cwt/test.npz",
+    "ubfc_cwt/ubc_testSINGLE.npz",
     X=X_test,
     y=y_test,
     subjects=subjects_test,
