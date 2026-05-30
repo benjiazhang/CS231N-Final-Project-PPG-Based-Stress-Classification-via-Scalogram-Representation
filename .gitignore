@@ -1,6 +1,9 @@
 /ubfc_cwt/cwtFiles/
 /bvp_ubfc/
 /ubfc_cwtSINGLE/cwtFiles
+/data/
+/results/
+/archive/
 wesad_cwt/cwtFiles/
 wesad_cwt/wesad_dataset.npz
 wesad_cwt/*.npz
