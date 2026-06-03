@@ -91,6 +91,12 @@ STAGES = ["cv", "test", "loso"]
 CV_FOLDS = 5            # GroupKFold splits for the sweep (capped to #subjects)
 PHASE2_BLOCKS = 0       # >0 = also unfreeze the last N backbone blocks (head-only if 0)
 
+# Sequential fine-tuning: when PHASE2_BLOCKS > 0, phase 2 loads the phase 1
+# checkpoint (final_model.pt from phase 1 out_dir) instead of fresh ImageNet weights.
+# Phase 2 CV sweeps lr only (other hyperparams inherited from phase 1).
+PHASE1_OUT_ROOT = os.path.join("results", "all_models")  # where phase 1 saved final_model.pt
+PHASE2_LR_GRID  = [1e-5, 3e-5, 1e-4]   # lower lrs to avoid destroying pretrained weights
+
 # Debug: subsample subjects to make a fast end-to-end smoke test
 QUICK_TEST = False
 QUICK_FRACTION = 0.3
@@ -320,6 +326,7 @@ def load_audiomae_encoder(pretrained: bool = True):
 @dataclass
 class ModelSpec:
     name: str
+    key: str
     builder: Callable[[float, bool], nn.Module]
     input_size: int | tuple   # int -> square; (H, W) -> non-square (AudioMAE)
     in_channels: int
@@ -333,6 +340,7 @@ class ModelSpec:
 REGISTRY: dict[str, ModelSpec] = {
     "efficientnet": ModelSpec(
         name="EfficientNet-B0",
+        key="efficientnet",
         builder=EfficientNetClassifier,
         input_size=224, in_channels=3,
         mean=IMAGENET_MEAN, std=IMAGENET_STD,
@@ -341,7 +349,7 @@ REGISTRY: dict[str, ModelSpec] = {
             "batch_size":   [8, 16],
             "weight_decay": [1e-5, 1e-4],
             "dropout":      [0.2, 0.3, 0.5],
-            "epochs":       [10],
+            "epochs":       [30],
         },
     ),
     "dinov2": ModelSpec(
@@ -360,20 +368,21 @@ REGISTRY: dict[str, ModelSpec] = {
     
     "cvt": ModelSpec(
         name="CvT-13",
+        key="cvt",
         builder=CvTClassifier,
         input_size=224, in_channels=3,
         mean=IMAGENET_MEAN, std=IMAGENET_STD,
-        # 20M params + transformer => keep the sweep modest
         grid={
             "lr":           [1e-4, 3e-4],
             "batch_size":   [8, 16],
             "weight_decay": [1e-5, 1e-4],
             "dropout":      [0.2, 0.3],
-            "epochs":       [10],
+            "epochs":       [30],
         },
     ),
     "audiomae": ModelSpec(
         name="AudioMAE",
+        key="audiomae",
         builder=AudioMAEClassifier,
         input_size=(1024, 128), in_channels=1,   # native AudioMAE shape (time, mel)
         mean=(0.0,), std=(1.0,),    # unused: standardize=True does per-image norm
@@ -383,7 +392,7 @@ REGISTRY: dict[str, ModelSpec] = {
             "batch_size":   [16, 32],
             "weight_decay": [1e-5, 1e-4],
             "dropout":      [0.2, 0.3],
-            "epochs":       [10],
+            "epochs":       [30],
         },
     ),
 }
@@ -516,8 +525,17 @@ def compute_metrics(labels, preds, probs):
     }
 
 
-def build(spec, dropout, pretrained=True, phase2_blocks=0):
+def build(spec, dropout, pretrained=True, phase2_blocks=0, phase1_ckpt=None):
+    """
+    Build model. If phase2_blocks > 0 and phase1_ckpt is provided, loads the
+    phase 1 checkpoint as starting weights (sequential fine-tuning). Otherwise
+    starts from ImageNet pretrained weights.
+    """
     m = spec.builder(dropout, pretrained)
+    if phase2_blocks > 0 and phase1_ckpt is not None and os.path.exists(phase1_ckpt):
+        state = torch.load(phase1_ckpt, map_location="cpu")
+        m.load_state_dict(state)
+        print(f"  [build] Loaded phase 1 checkpoint: {phase1_ckpt}")
     m.freeze_backbone()
     if phase2_blocks > 0 and spec.supports_phase2:
         m.unfreeze_top_blocks(phase2_blocks)
@@ -528,16 +546,21 @@ def fit(model, train_loader, criterion, lr, epochs, weight_decay,
         val_loader=None, patience=None, verbose=False):
     """
     Train `model`. If val_loader is given, checkpoint the best val-F1 state in
-    memory and (optionally) early-stop. Returns the model with best/last weights.
+    memory and (optionally) early-stop. Returns (model, best_f1, history).
+    history is a list of dicts with per-epoch train/val metrics.
     """
     opt = torch.optim.AdamW(model.trainable_params(), lr=lr, weight_decay=weight_decay)
     best_f1, best_state, no_improve = -1.0, None, 0
+    history = []
 
     for ep in range(1, epochs + 1):
         tr_loss = train_one_epoch(model, train_loader, opt, criterion)
+        row = {"epoch": ep, "train_loss": tr_loss}
         if val_loader is not None:
             yl, yp, pr = predict(model, val_loader)
-            vf1 = f1_score(yl, yp, zero_division=0)
+            vm = compute_metrics(yl, yp, pr)
+            vf1 = vm["f1"]
+            row.update({f"val_{k}": v for k, v in vm.items()})
             if verbose:
                 print(f"    epoch {ep:>2}/{epochs}  train_loss={tr_loss:.4f}  val_f1={vf1:.4f}")
             if vf1 > best_f1:
@@ -549,24 +572,47 @@ def fit(model, train_loader, criterion, lr, epochs, weight_decay,
                 if patience is not None and no_improve >= patience:
                     if verbose:
                         print(f"    early stop @ epoch {ep}")
+                    history.append(row)
                     break
         elif verbose:
             print(f"    epoch {ep:>2}/{epochs}  train_loss={tr_loss:.4f}")
+        history.append(row)
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    return model, best_f1
+    return model, best_f1, history
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  STAGE 1 — CV HYPERPARAMETER SWEEP
 # ══════════════════════════════════════════════════════════════════════════════
 def cv_sweep(spec, X, y, subjects, out_dir):
-    print(f"\n{'='*70}\n  [{spec.name}] STAGE 1 — CV hyperparameter sweep\n{'='*70}")
+    sep = "=" * 70
+    print(f"\n{sep}\n  [{spec.name}] STAGE 1 — CV hyperparameter sweep\n{sep}")
     Xp = preprocess(X, spec)
 
-    keys = list(spec.grid.keys())
-    combos = list(itertools.product(*spec.grid.values()))
+    # Phase 2 (sequential): sweep lr only, load phase 1 checkpoint as starting weights.
+    is_phase2 = PHASE2_BLOCKS > 0
+    phase1_ckpt = os.path.join(PHASE1_OUT_ROOT, spec.key, "final_model.pt") if is_phase2 else None
+
+    if is_phase2:
+        grid = {
+            "lr":           PHASE2_LR_GRID,
+            "batch_size":   [spec.grid["batch_size"][0]],
+            "weight_decay": [spec.grid["weight_decay"][0]],
+            "dropout":      [spec.grid["dropout"][0]],
+            "epochs":       spec.grid["epochs"],
+        }
+        print(f"  Phase 2 mode: sweeping lr only {PHASE2_LR_GRID}")
+        if phase1_ckpt and os.path.exists(phase1_ckpt):
+            print(f"  Loading phase 1 checkpoint: {phase1_ckpt}")
+        else:
+            print(f"  WARNING: phase 1 checkpoint not found at {phase1_ckpt} — starting from ImageNet weights")
+    else:
+        grid = spec.grid
+
+    keys = list(grid.keys())
+    combos = list(itertools.product(*grid.values()))
     k = min(CV_FOLDS, len(np.unique(subjects)))
     gkf = GroupKFold(n_splits=k)
 
@@ -580,12 +626,13 @@ def cv_sweep(spec, X, y, subjects, out_dir):
             criterion = class_weighted_criterion(y[tr])
 
             model = build(spec, float(params["dropout"]), pretrained=True,
-                          phase2_blocks=PHASE2_BLOCKS)
-            model, best_f1 = fit(
+                          phase2_blocks=PHASE2_BLOCKS, phase1_ckpt=phase1_ckpt)
+            model, best_f1, _ = fit(
                 model, train_loader, criterion,
                 lr=float(params["lr"]), epochs=int(params["epochs"]),
                 weight_decay=float(params["weight_decay"]),
                 val_loader=val_loader,
+                patience=10,
             )
             yl, yp, pr = predict(model, val_loader)
             m = compute_metrics(yl, yp, pr)
@@ -595,44 +642,7 @@ def cv_sweep(spec, X, y, subjects, out_dir):
             if DEVICE == "cuda":
                 torch.cuda.empty_cache()
 
-    results = pd.DataFrame(rows)
-    results.to_csv(os.path.join(out_dir, "cv_results.csv"), index=False)
 
-    summary = (results.groupby(keys)[["acc", "balanced_acc", "f1",
-                                      "sensitivity", "specificity", "auroc"]]
-               .mean().reset_index().sort_values("f1", ascending=False))
-    summary.to_csv(os.path.join(out_dir, "cv_summary.csv"), index=False)
-
-    _plot_cv_f1(summary, keys, out_dir)
-
-    best_params = summary.iloc[0][keys].to_dict()
-    # cast numeric types back
-    for kk in ("batch_size", "epochs"):
-        if kk in best_params:
-            best_params[kk] = int(best_params[kk])
-    with open(os.path.join(out_dir, "best_params.json"), "w") as f:
-        json.dump(best_params, f, indent=2)
-    print(f"\n  Best params for {spec.name}: {best_params}")
-    return best_params
-
-
-def _plot_cv_f1(summary, keys, out_dir):
-    s = summary.sort_values("f1", ascending=True)
-    labels = s.apply(
-        lambda r: ", ".join(f"{k}={r[k]}" for k in keys if k != "epochs"), axis=1)
-    plt.figure(figsize=(10, max(4, 0.4 * len(s))))
-    plt.barh(range(len(s)), s["f1"])
-    plt.yticks(range(len(s)), labels, fontsize=7)
-    plt.xlabel("Mean CV F1")
-    plt.title("Hyperparameter search")
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "cv_f1_by_combo.png"), dpi=200)
-    plt.close()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  STAGE 2 — FINAL TEST EVALUATION
-# ══════════════════════════════════════════════════════════════════════════════
 def final_test(spec, best_params, splits, out_dir):
     print(f"\n{'='*70}\n  [{spec.name}] STAGE 2 — final fit + test eval\n{'='*70}")
     (Xtr, ytr, _, _), (Xva, yva, _, _), (Xte, yte, ste, _) = splits
@@ -655,16 +665,27 @@ def final_test(spec, best_params, splits, out_dir):
     test_loader  = make_loader(Xte_p, yte, bs, False)
     criterion = class_weighted_criterion(ydev)
 
+    phase1_ckpt = os.path.join(PHASE1_OUT_ROOT, spec.key, "final_model.pt") if PHASE2_BLOCKS > 0 else None
     model = build(spec, float(best_params["dropout"]), pretrained=True,
-                  phase2_blocks=PHASE2_BLOCKS)
-    model, _ = fit(
+                  phase2_blocks=PHASE2_BLOCKS, phase1_ckpt=phase1_ckpt)
+
+    # Use val loader for training curves (train on dev, monitor val separately)
+    Xva_p = preprocess(Xva, spec)
+    val_loader_curves = make_loader(Xva_p, yva, bs, False)
+
+    model, _, history = fit(
         model, train_loader, criterion,
         lr=float(best_params["lr"]), epochs=int(best_params["epochs"]),
         weight_decay=float(best_params["weight_decay"]),
-        val_loader=None,   # train the full epoch budget on the pooled set
+        val_loader=val_loader_curves,
         verbose=True,
     )
     torch.save(model.state_dict(), os.path.join(out_dir, "final_model.pt"))
+
+    # Save training history and plot curves
+    if history:
+        pd.DataFrame(history).to_csv(os.path.join(out_dir, "training_history.csv"), index=False)
+        _plot_training_curves(history, spec.name, out_dir)
 
     yl, yp, pr = predict(model, test_loader)
     metrics = compute_metrics(yl, yp, pr)
@@ -682,6 +703,13 @@ def final_test(spec, best_params, splits, out_dir):
     _per_subject_table(yl, yp, pr, ste, os.path.join(out_dir, "per_subject_test.csv"),
                        os.path.join(out_dir, "per_subject_test.png"),
                        f"{spec.name} — Per-subject test accuracy")
+
+    # Grad-CAM on test set (EfficientNet and CvT only)
+    _run_gradcam_if_supported(model, spec, Xte, yte, ste, "test", out_dir)
+
+    # t-SNE of test embeddings
+    _plot_tsne(model, spec, Xte_p, yte, ste, out_dir)
+
     del model
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
@@ -711,10 +739,11 @@ def loso(spec, best_params, X, y, subjects, out_dir):
         test_loader  = make_loader(Xp[te], y[te], bs, False)
         criterion = class_weighted_criterion(y[tr])
 
+        _phase1_ckpt = os.path.join(PHASE1_OUT_ROOT, spec.key, "final_model.pt") if PHASE2_BLOCKS > 0 else None
         model = build(spec, float(best_params["dropout"]), pretrained=True,
-                      phase2_blocks=PHASE2_BLOCKS)
+                      phase2_blocks=PHASE2_BLOCKS, phase1_ckpt=_phase1_ckpt)
         # No internal val here: best params already chosen -> fixed epochs.
-        model, _ = fit(
+        model, _, _ = fit(
             model, train_loader, criterion,
             lr=float(best_params["lr"]), epochs=int(best_params["epochs"]),
             weight_decay=float(best_params["weight_decay"]),
@@ -826,6 +855,288 @@ def _per_subject_table(labels, preds, probs, subjects, csv_path, png_path, title
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  TRAINING CURVES
+# ══════════════════════════════════════════════════════════════════════════════
+def _plot_training_curves(history, model_name, out_dir):
+    df = pd.DataFrame(history)
+    metrics = [
+        ("train_loss",    "val_loss",         "Loss"),
+        ("val_f1",        None,               "F1"),
+        ("val_balanced_acc", None,            "Balanced Accuracy"),
+        ("val_sensitivity",  None,            "Sensitivity"),
+        ("val_specificity",  None,            "Specificity"),
+        ("val_auroc",    None,                "AUROC"),
+    ]
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    epochs = df["epoch"].values
+    for ax, (train_key, val_key, title) in zip(axes.flat, metrics):
+        if train_key in df.columns:
+            ax.plot(epochs, df[train_key], label="train", alpha=0.7, linestyle="--")
+        if val_key and val_key in df.columns:
+            ax.plot(epochs, df[val_key], label="val")
+        elif train_key.startswith("val_") and train_key in df.columns:
+            ax.plot(epochs, df[train_key], label="val")
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("Epoch")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+    plt.suptitle(f"{model_name} — Training Curves", fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "training_curves.png"), dpi=150)
+    plt.close()
+    print(f"  Saved training_curves.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  GRAD-CAM
+# ══════════════════════════════════════════════════════════════════════════════
+class _GradCAMEfficientNet:
+    """Grad-CAM for EfficientNet-B0: hooks model.features[-1]."""
+
+    def __init__(self, model):
+        self.model = model
+        self.activations = None
+        self.gradients   = None
+        layer = model.model.features[-1]
+        layer.register_forward_hook(self._save_act)
+        layer.register_full_backward_hook(self._save_grad)
+
+    def _save_act(self, m, inp, out):
+        self.activations = out.detach()
+
+    def _save_grad(self, m, gin, gout):
+        self.gradients = gout[0].detach()
+
+    def generate(self, x, class_idx=None):
+        self.model.eval()
+        x = x.to(DEVICE).requires_grad_(True)
+        logits = self.model(x)
+        if class_idx is None:
+            class_idx = logits.argmax(dim=1).item()
+        self.model.zero_grad()
+        logits[0, class_idx].backward()
+        w = self.gradients.mean(dim=(2, 3), keepdim=True)
+        cam = F.relu((w * self.activations).sum(dim=1, keepdim=True))
+        cam = F.interpolate(cam, size=x.shape[2:], mode="bilinear", align_corners=False)
+        cam = cam.squeeze().cpu().numpy()
+        if cam.max() > cam.min():
+            cam = (cam - cam.min()) / (cam.max() - cam.min())
+        return cam
+
+
+class _GradCAMCvT:
+    """Grad-CAM for CvT-13: hooks last Conv2d in stage 3 dynamically."""
+
+    def __init__(self, model):
+        self.model = model
+        self.activations = None
+        self.gradients   = None
+        self.enabled     = False
+        target = None
+        try:
+            stage3 = model.base.cvt.encoder.stages[2]
+            for m in stage3.modules():
+                if isinstance(m, nn.Conv2d):
+                    target = m
+        except Exception:
+            pass
+        if target is not None:
+            target.register_forward_hook(self._save_act)
+            target.register_full_backward_hook(self._save_grad)
+            self.enabled = True
+
+    def _save_act(self, m, inp, out):
+        self.activations = out.detach()
+
+    def _save_grad(self, m, gin, gout):
+        self.gradients = gout[0].detach()
+
+    def generate(self, x, class_idx=None):
+        if not self.enabled:
+            return None
+        self.model.eval()
+        x = x.to(DEVICE).requires_grad_(True)
+        logits = self.model(x)
+        if class_idx is None:
+            class_idx = logits.argmax(dim=1).item()
+        self.model.zero_grad()
+        logits[0, class_idx].backward()
+        act, grad = self.activations, self.gradients
+        if act is None or grad is None:
+            return None
+        if act.ndim == 4:
+            w = grad.mean(dim=(2, 3), keepdim=True)
+            cam = F.relu((w * act).sum(dim=1, keepdim=True))
+        else:
+            B, N, C = act.shape
+            H = W = int(N ** 0.5)
+            act  = act.permute(0, 2, 1).reshape(B, C, H, W)
+            grad = grad.permute(0, 2, 1).reshape(B, C, H, W)
+            w = grad.mean(dim=(2, 3), keepdim=True)
+            cam = F.relu((w * act).sum(dim=1, keepdim=True))
+        cam = F.interpolate(cam, size=x.shape[2:], mode="bilinear", align_corners=False)
+        cam = cam.squeeze().cpu().numpy()
+        if cam.max() > cam.min():
+            cam = (cam - cam.min()) / (cam.max() - cam.min())
+        return cam
+
+
+def _get_gradcam(model, model_key):
+    if model_key == "efficientnet":
+        return _GradCAMEfficientNet(model)
+    if model_key == "cvt":
+        return _GradCAMCvT(model)
+    return None  # AudioMAE: skip
+
+
+def _save_gradcam_figure(raw_img, cam, true_label, pred_label, prob_stress, out_path):
+    import matplotlib.cm as mplcm
+    # raw_img: (C, H, W) in [0,1]; show first channel for grayscale
+    img_hw = raw_img[0] if raw_img.shape[0] == 1 else raw_img.transpose(1, 2, 0)
+    heatmap = mplcm.jet(cam)[..., :3]
+    if img_hw.ndim == 2:
+        img_rgb = np.stack([img_hw] * 3, axis=-1)
+    else:
+        img_rgb = img_hw
+    overlay = np.clip(0.55 * img_rgb + 0.45 * heatmap, 0, 1)
+    fig, axes = plt.subplots(1, 3, figsize=(10, 3))
+    axes[0].imshow(img_rgb, cmap="gray" if img_hw.ndim == 2 else None)
+    axes[0].set_title("Scalogram")
+    axes[1].imshow(cam, cmap="jet")
+    axes[1].set_title("Grad-CAM")
+    axes[2].imshow(overlay)
+    axes[2].set_title(
+        f"Overlay\nTrue: {CLASS_NAMES[true_label]}  "
+        f"Pred: {CLASS_NAMES[pred_label]}  P(stress)={prob_stress:.2f}"
+    )
+    for ax in axes:
+        ax.axis("off")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def _run_gradcam_if_supported(model, spec, X_raw, y, subjects, split_name, out_dir,
+                               n_per_class=3):
+    gradcam = _get_gradcam(model, spec.key)
+    if gradcam is None:
+        print(f"  [GradCAM] Skipping {spec.name} (not supported)")
+        return
+    gradcam_dir = os.path.join(out_dir, "gradcam", split_name)
+    os.makedirs(gradcam_dir, exist_ok=True)
+    Xp = preprocess(X_raw, spec)
+    for cls in range(2):
+        indices = np.where(y == cls)[0]
+        chosen = []
+        for s in np.unique(subjects[indices]):
+            s_idx = indices[subjects[indices] == s]
+            chosen.append(s_idx[0])
+            if len(chosen) >= n_per_class:
+                break
+        if len(chosen) < n_per_class:
+            chosen = indices[:n_per_class].tolist()
+        for i, idx in enumerate(chosen[:n_per_class]):
+            x_t = torch.tensor(Xp[idx:idx+1], dtype=torch.float32)
+            cam = gradcam.generate(x_t, class_idx=cls)
+            if cam is None:
+                continue
+            with torch.no_grad():
+                logits = model(x_t.to(DEVICE))
+                prob   = torch.softmax(logits, dim=1)[0, 1].item()
+            pred = logits.argmax(dim=1).item()
+            fname = f"class{cls}_{CLASS_NAMES[cls].replace(' ','_')}_s{int(subjects[idx])}_sample{i:02d}.png"
+            _save_gradcam_figure(
+                raw_img=X_raw[idx],
+                cam=cam,
+                true_label=int(y[idx]),
+                pred_label=pred,
+                prob_stress=prob,
+                out_path=os.path.join(gradcam_dir, fname),
+            )
+    print(f"  Grad-CAM images saved → {gradcam_dir}/")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  t-SNE
+# ══════════════════════════════════════════════════════════════════════════════
+def _extract_embeddings(model, spec, Xp, batch_size=32):
+    """Extract penultimate-layer embeddings for t-SNE."""
+    embeddings = []
+
+    def _hook(m, inp, out):
+        if out.ndim == 2:
+            embeddings.append(out.detach().cpu().numpy())
+        else:
+            embeddings.append(out.flatten(1).detach().cpu().numpy())
+
+    # Register hook on the layer before the final classifier
+    if isinstance(model, EfficientNetClassifier):
+        handle = model.model.avgpool.register_forward_hook(_hook)
+    elif isinstance(model, CvTClassifier):
+        handle = model.base.cvt.encoder.stages[-1].register_forward_hook(_hook)
+    elif isinstance(model, AudioMAEClassifier):
+        handle = model.encoder.norm.register_forward_hook(_hook)
+    else:
+        print("  [t-SNE] Unknown model type, skipping.")
+        return None
+    model.eval()
+    ds = TensorDataset(torch.tensor(Xp, dtype=torch.float32))
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
+    with torch.no_grad():
+        for (xb,) in loader:
+            model(xb.to(DEVICE))
+    handle.remove()
+    return np.concatenate(embeddings, axis=0)
+
+
+def _plot_tsne(model, spec, Xp, y, subjects, out_dir):
+    try:
+        from sklearn.manifold import TSNE
+    except ImportError:
+        print("  [t-SNE] sklearn not available, skipping.")
+        return
+    print("  Running t-SNE on test embeddings …")
+    emb = _extract_embeddings(model, spec, Xp)
+    if emb is None:
+        return
+    # Subsample if too large
+    if len(emb) > 500:
+        idx = np.random.choice(len(emb), 500, replace=False)
+        emb, y_p, s_p = emb[idx], y[idx], subjects[idx]
+    else:
+        y_p, s_p = y, subjects
+
+    tsne = TSNE(n_components=2, random_state=SEED, perplexity=min(30, len(emb)-1))
+    coords = tsne.fit_transform(emb)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    # Color by label
+    colors_label = ["steelblue" if yi == 0 else "tomato" for yi in y_p]
+    axes[0].scatter(coords[:, 0], coords[:, 1], c=colors_label, alpha=0.7, s=20)
+    axes[0].set_title(f"{spec.name} — t-SNE by Label")
+    axes[0].legend(handles=[
+        Patch(color="steelblue", label="No Stress"),
+        Patch(color="tomato",    label="Stress"),
+    ], fontsize=8)
+    axes[0].set_xlabel("t-SNE 1"); axes[0].set_ylabel("t-SNE 2")
+
+    # Color by dataset (WESAD=subject<100, UBFC=subject>=100)
+    colors_ds = ["#e07b54" if si >= 100 else "#4c8bbe" for si in s_p]
+    axes[1].scatter(coords[:, 0], coords[:, 1], c=colors_ds, alpha=0.7, s=20)
+    axes[1].set_title(f"{spec.name} — t-SNE by Dataset")
+    axes[1].legend(handles=[
+        Patch(color="#4c8bbe", label="WESAD"),
+        Patch(color="#e07b54", label="UBFC-Phys"),
+    ], fontsize=8)
+    axes[1].set_xlabel("t-SNE 1"); axes[1].set_ylabel("t-SNE 2")
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "tsne_test.png"), dpi=150)
+    plt.close()
+    print(f"  Saved tsne_test.png")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
@@ -835,7 +1146,7 @@ def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
     `main()` with no args runs every stage for every model. The CLI (see
     parse_args) and Modal wrappers pass overrides here.
     """
-    global CV_FOLDS, PHASE2_BLOCKS, QUICK_TEST, OUT_ROOT, TRAIN_PATH, VAL_PATH, TEST_PATH
+    global CV_FOLDS, PHASE2_BLOCKS, QUICK_TEST, OUT_ROOT, TRAIN_PATH, VAL_PATH, TEST_PATH, PHASE1_OUT_ROOT
 
     models = models or MODELS_TO_RUN
     stages = stages or STAGES
