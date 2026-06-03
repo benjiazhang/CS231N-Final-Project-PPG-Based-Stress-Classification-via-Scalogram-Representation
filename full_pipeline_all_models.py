@@ -81,7 +81,7 @@ TEST_PATH  = os.path.join("testSINGLE.npz")
 OUT_ROOT   = os.path.join( "results", "all_models")
 
 # Which models to run by default (override with --models on the CLI).
-MODELS_TO_RUN = ["efficientnet", "cvt", "audiomae"]
+MODELS_TO_RUN = ["efficientnet", "dinov2", "cvt", "audiomae"]
 
 # Which stages to run by default (override with --stages on the CLI).
 # Stages run independently: "cv" sweeps + saves best_params.json; "test" and
@@ -144,6 +144,43 @@ class EfficientNetClassifier(nn.Module):
         n_blocks = len(self.model.features)
         cutoff = n_blocks - n
         for i, block in enumerate(self.model.features):
+            for p in block.parameters():
+                p.requires_grad = (i >= cutoff)
+
+    def trainable_params(self):
+        return [p for p in self.parameters() if p.requires_grad]
+
+
+class DINOv2Classifier(nn.Module):
+    """
+    DINOv2 ViT-B/14 (Facebook, 86M params) with a 2-class head.
+    Requires: pip install transformers
+    """
+
+    def __init__(self, dropout: float = 0.3, pretrained: bool = True):
+        super().__init__()
+        from transformers import AutoModel
+        self.encoder = AutoModel.from_pretrained("facebook/dinov2-small") if pretrained \
+            else AutoModel.from_pretrained("facebook/dinov2-small", ignore_mismatched_sizes=True)
+        embed_dim = self.encoder.config.hidden_size  # 384 for small
+        self.head = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(embed_dim, 2),
+        )
+
+    def forward(self, x):
+        outputs = self.encoder(pixel_values=x)
+        cls_token = outputs.last_hidden_state[:, 0]  # use [CLS] token
+        return self.head(cls_token)
+
+    def freeze_backbone(self):
+        for p in self.encoder.parameters():
+            p.requires_grad = False
+
+    def unfreeze_top_blocks(self, n: int):
+        blocks = self.encoder.encoder.layer
+        cutoff = len(blocks) - n
+        for i, block in enumerate(blocks):
             for p in block.parameters():
                 p.requires_grad = (i >= cutoff)
 
@@ -307,6 +344,20 @@ REGISTRY: dict[str, ModelSpec] = {
             "epochs":       [10],
         },
     ),
+    "dinov2": ModelSpec(
+       name="DINOv2-Small",
+       builder=DINOv2Classifier,
+       input_size=224, in_channels=3,
+       mean=IMAGENET_MEAN, std=IMAGENET_STD,
+       grid={
+           "lr":           [1e-4, 3e-4],
+           "batch_size":   [8, 16],
+           "weight_decay": [1e-5, 1e-4],
+           "dropout":      [0.2, 0.3],
+           "epochs":       [10],
+       },
+    ),
+    
     "cvt": ModelSpec(
         name="CvT-13",
         builder=CvTClassifier,
