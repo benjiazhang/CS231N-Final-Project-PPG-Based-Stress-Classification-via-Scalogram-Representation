@@ -588,14 +588,14 @@ def fit(model, train_loader, criterion, lr, epochs, weight_decay,
 # ══════════════════════════════════════════════════════════════════════════════
 #  STAGE 1 — CV HYPERPARAMETER SWEEP
 # ══════════════════════════════════════════════════════════════════════════════
-def cv_sweep(spec, X, y, subjects, out_dir):
+def cv_sweep(spec, X, y, subjects, out_dir, phase1_ckpt=None):
     sep = "=" * 70
     print(f"\n{sep}\n  [{spec.name}] STAGE 1 — CV hyperparameter sweep\n{sep}")
     Xp = preprocess(X, spec)
 
     # Phase 2 (sequential): sweep lr only, load phase 1 checkpoint as starting weights.
     is_phase2 = PHASE2_BLOCKS > 0
-    phase1_ckpt = os.path.join(PHASE1_OUT_ROOT, spec.key, "final_model.pt") if is_phase2 else None
+    #phase1_ckpt = os.path.join(PHASE1_OUT_ROOT, spec.key, "final_model.pt") if is_phase2 else None
 
     if is_phase2:
         grid = {
@@ -661,7 +661,7 @@ def cv_sweep(spec, X, y, subjects, out_dir):
     return best_params
 
 
-def final_test(spec, best_params, splits, out_dir):
+def final_test(spec, best_params, splits, out_dir, phase1_ckpt=None):
     print(f"\n{'='*70}\n  [{spec.name}] STAGE 2 — final fit + test eval\n{'='*70}")
     (Xtr, ytr, _, _), (Xva, yva, _, _), (Xte, yte, ste, _) = splits
 
@@ -683,7 +683,7 @@ def final_test(spec, best_params, splits, out_dir):
     test_loader  = make_loader(Xte_p, yte, bs, False)
     criterion = class_weighted_criterion(ydev)
 
-    phase1_ckpt = os.path.join(PHASE1_OUT_ROOT, spec.key, "final_model.pt") if PHASE2_BLOCKS > 0 else None
+    #phase1_ckpt = os.path.join(PHASE1_OUT_ROOT, spec.key, "final_model.pt") if PHASE2_BLOCKS > 0 else None
     model = build(spec, float(best_params["dropout"]), pretrained=True,
                   phase2_blocks=PHASE2_BLOCKS, phase1_ckpt=phase1_ckpt)
 
@@ -737,7 +737,7 @@ def final_test(spec, best_params, splits, out_dir):
 # ══════════════════════════════════════════════════════════════════════════════
 #  STAGE 3 — LEAVE-ONE-SUBJECT-OUT
 # ══════════════════════════════════════════════════════════════════════════════
-def loso(spec, best_params, X, y, subjects, out_dir):
+def loso(spec, best_params, X, y, subjects, out_dir, phase1_ckpt=None):
     print(f"\n{'='*70}\n  [{spec.name}] STAGE 3 — LOSO over pooled dataset\n{'='*70}")
     Xp = preprocess(X, spec)
     uniq = np.unique(subjects)
@@ -757,9 +757,9 @@ def loso(spec, best_params, X, y, subjects, out_dir):
         test_loader  = make_loader(Xp[te], y[te], bs, False)
         criterion = class_weighted_criterion(y[tr])
 
-        _phase1_ckpt = os.path.join(PHASE1_OUT_ROOT, spec.key, "final_model.pt") if PHASE2_BLOCKS > 0 else None
+        #_phase1_ckpt = os.path.join(PHASE1_OUT_ROOT, spec.key, "final_model.pt") if PHASE2_BLOCKS > 0 else None
         model = build(spec, float(best_params["dropout"]), pretrained=True,
-                      phase2_blocks=PHASE2_BLOCKS, phase1_ckpt=_phase1_ckpt)
+                      phase2_blocks=PHASE2_BLOCKS, phase1_ckpt=phase1_ckpt)
         # No internal val here: best params already chosen -> fixed epochs.
         model, _, _ = fit(
             model, train_loader, criterion,
@@ -1221,14 +1221,22 @@ def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
     overall = {}
     for key in models:
         spec = REGISTRY[key]
-        out_dir = os.path.join(OUT_ROOT, key)
+        
+        phase_suffix = f"_phase2_blocks{PHASE2_BLOCKS}" if PHASE2_BLOCKS > 0 else "_phase1"
+        out_dir = os.path.join(OUT_ROOT, key + phase_suffix)
         os.makedirs(out_dir, exist_ok=True)
+        
+        # phase 1 checkpoint path (only used when PHASE2_BLOCKS > 0)
+        phase1_dir = os.path.join(PHASE1_OUT_ROOT, key + "_phase1")
+        phase1_ckpt = os.path.join(phase1_dir, "final_model.pt") if PHASE2_BLOCKS > 0 else None
+        # out_dir = os.path.join(OUT_ROOT, key)
+        # os.makedirs(out_dir, exist_ok=True)
         print(f"\n\n########## {spec.name} ##########")
 
         # Stage 1 — sweep (or load existing best params if cv isn't in this run)
         bp_path = os.path.join(out_dir, "best_params.json")
         if run_cv:
-            best_params = cv_sweep(spec, Xtv, ytv, stv, out_dir)
+            best_params = cv_sweep(spec, Xtv, ytv, stv, out_dir, phase1_ckpt=phase1_ckpt)
         elif os.path.exists(bp_path):
             best_params = json.load(open(bp_path))
             print(f"  Loaded best params: {best_params}")
@@ -1241,11 +1249,11 @@ def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
 
         # Stage 2 — test eval
         if run_test:
-            model_summary["test"] = final_test(spec, best_params, splits, out_dir)
+            model_summary["test"] = final_test(spec, best_params, splits, out_dir, phase1_ckpt=phase1_ckpt)
 
         # Stage 3 — LOSO
         if run_loso:
-            model_summary["loso"] = loso(spec, best_params, Xall, yall, sall, out_dir)
+            model_summary["loso"] = loso(spec, best_params, Xall, yall, sall, out_dir, phase1_ckpt=phase1_ckpt)
 
         overall[key] = model_summary
         with open(os.path.join(out_dir, "summary.json"), "w") as f:
