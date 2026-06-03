@@ -91,6 +91,7 @@ STAGES = ["cv", "test", "loso"]
 
 CV_FOLDS = 5            # GroupKFold splits for the sweep (capped to #subjects)
 PHASE2_BLOCKS = 0       # >0 = also unfreeze the last N backbone blocks (head-only if 0)
+FULL_FINETUNE = False   # True = unfreeze entire backbone (overrides PHASE2_BLOCKS)
 
 # Sequential fine-tuning: when PHASE2_BLOCKS > 0, phase 2 loads the phase 1
 # checkpoint (final_model.pt from phase 1 out_dir) instead of fresh ImageNet weights.
@@ -531,16 +532,23 @@ def build(spec, dropout, pretrained=True, phase2_blocks=0, phase1_ckpt=None):
     """
     Build model. If phase2_blocks > 0 and phase1_ckpt is provided, loads the
     phase 1 checkpoint as starting weights (sequential fine-tuning). Otherwise
-    starts from ImageNet pretrained weights.
+    starts from pretrained weights.
+    If FULL_FINETUNE is True, unfreezes the entire backbone.
     """
     m = spec.builder(dropout, pretrained)
-    if phase2_blocks > 0 and phase1_ckpt is not None and os.path.exists(phase1_ckpt):
+    if (phase2_blocks > 0 or FULL_FINETUNE) and phase1_ckpt is not None and os.path.exists(phase1_ckpt):
         state = torch.load(phase1_ckpt, map_location="cpu")
         m.load_state_dict(state)
         print(f"  [build] Loaded phase 1 checkpoint: {phase1_ckpt}")
-    m.freeze_backbone()
-    if phase2_blocks > 0 and spec.supports_phase2:
-        m.unfreeze_top_blocks(phase2_blocks)
+    if FULL_FINETUNE:
+        # Unfreeze everything — no freeze_backbone() call
+        for p in m.parameters():
+            p.requires_grad = True
+        print(f"  [build] Full fine-tuning: all layers unfrozen")
+    else:
+        m.freeze_backbone()
+        if phase2_blocks > 0 and spec.supports_phase2:
+            m.unfreeze_top_blocks(phase2_blocks)
     return m.to(DEVICE)
 
 
@@ -1160,19 +1168,22 @@ def _plot_tsne(model, spec, Xp, y, subjects, out_dir):
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
-         quick=None, out_root=None, train_path=None, val_path=None, test_path=None):
+         full_finetune=None, quick=None, out_root=None, phase1_out_root=None,
+         train_path=None, val_path=None, test_path=None):
     """
     Run the pipeline. All args default to the module-level CONFIG values, so
     `main()` with no args runs every stage for every model. The CLI (see
     parse_args) and Modal wrappers pass overrides here.
     """
-    global CV_FOLDS, PHASE2_BLOCKS, QUICK_TEST, OUT_ROOT, TRAIN_PATH, VAL_PATH, TEST_PATH, PHASE1_OUT_ROOT
+    global CV_FOLDS, PHASE2_BLOCKS, FULL_FINETUNE, QUICK_TEST, OUT_ROOT, TRAIN_PATH, VAL_PATH, TEST_PATH, PHASE1_OUT_ROOT
 
     models = models or MODELS_TO_RUN
     stages = stages or STAGES
-    if cv_folds      is not None: CV_FOLDS      = cv_folds
-    if phase2_blocks is not None: PHASE2_BLOCKS = phase2_blocks
-    if quick         is not None: QUICK_TEST    = quick
+    if cv_folds      is not None: CV_FOLDS        = cv_folds
+    if phase2_blocks is not None: PHASE2_BLOCKS   = phase2_blocks
+    if full_finetune    is not None: FULL_FINETUNE    = full_finetune
+    if phase1_out_root  is not None: PHASE1_OUT_ROOT  = phase1_out_root
+    if quick            is not None: QUICK_TEST       = quick
     if out_root      is not None: OUT_ROOT      = out_root
     if train_path    is not None: TRAIN_PATH    = train_path
     if val_path      is not None: VAL_PATH      = val_path
@@ -1280,6 +1291,8 @@ def parse_args():
                    help="GroupKFold splits for the sweep.")
     p.add_argument("--phase2-blocks", type=int, default=None,
                    help=">0 also unfreezes the last N backbone blocks.")
+    p.add_argument("--full-finetune", action="store_true", default=None,
+                   help="Unfreeze entire backbone (sequential from phase 1 checkpoint).")
     p.add_argument("--quick", action="store_true",
                    help="Subsample subjects for a fast smoke test.")
     p.add_argument("--out-root", default=None)
@@ -1294,6 +1307,7 @@ if __name__ == "__main__":
     main(
         models=args.models, stages=args.stages,
         cv_folds=args.cv_folds, phase2_blocks=args.phase2_blocks,
+        full_finetune=(True if args.full_finetune else None),
         quick=(args.quick or None),
         out_root=args.out_root, train_path=args.train,
         val_path=args.val, test_path=args.test,
