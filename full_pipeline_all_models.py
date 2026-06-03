@@ -62,6 +62,7 @@ from sklearn.metrics import (
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -761,6 +762,13 @@ def _per_subject_table(labels, preds, probs, subjects, csv_path, png_path, title
     ax.set_ylim(0, 1.05)
     ax.set_ylabel("Window-level accuracy")
     ax.set_title(title)
+    
+    legend_elements = [
+        Patch(facecolor="steelblue", label="Correct subject-level prediction"),
+        Patch(facecolor="tomato",    label="Incorrect subject-level prediction"),
+    ]
+    ax.legend(handles=legend_elements, loc="upper left", fontsize=8)
+    
     plt.tight_layout()
     plt.savefig(png_path, dpi=150)
     plt.close()
@@ -794,6 +802,11 @@ def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
 
     print(f"Device: {DEVICE}")
     print(f"Models: {models}  |  Stages: {stages}")
+    if phase2_blocks is not None:
+        print(f"Phase 2 Blocks: {PHASE2_BLOCKS}")
+    if cv_folds is not None:
+        print(f"CV Folds: {CV_FOLDS}")
+        
     os.makedirs(OUT_ROOT, exist_ok=True)
 
     print("Loading splits …")
