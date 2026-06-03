@@ -644,6 +644,22 @@ def cv_sweep(spec, X, y, subjects, out_dir):
             if DEVICE == "cuda":
                 torch.cuda.empty_cache()
 
+    # Save CV results and pick best hyperparameters by mean F1
+    results_df = pd.DataFrame(rows)
+    results_df.to_csv(os.path.join(out_dir, "crossval_results.csv"), index=False)
+    metric_cols = list(compute_metrics(np.array([0,1]),np.array([0,1]),np.array([0.0,1.0])).keys())
+    hp_cols = [c for c in results_df.columns if c not in metric_cols + ["fold"]]
+    summary = (results_df.groupby(hp_cols)[["f1","balanced_acc"]]
+               .mean().reset_index().sort_values("f1", ascending=False))
+    summary.to_csv(os.path.join(out_dir, "cv_summary.csv"), index=False)
+    best_row = summary.iloc[0]
+    best_params = {k: best_row[k] for k in hp_cols}
+    with open(os.path.join(out_dir, "best_params.json"), "w") as f:
+        json.dump(best_params, f, indent=2)
+    print(f"\n  Best params: {best_params}")
+    print(f"  Best mean CV F1: {best_row['f1']:.4f}  bal_acc: {best_row['balanced_acc']:.4f}")
+    return best_params
+
 
 def final_test(spec, best_params, splits, out_dir):
     print(f"\n{'='*70}\n  [{spec.name}] STAGE 2 — final fit + test eval\n{'='*70}")
@@ -1074,6 +1090,8 @@ def _extract_embeddings(model, spec, Xp, batch_size=32):
     # Register hook on the layer before the final classifier
     if isinstance(model, EfficientNetClassifier):
         handle = model.model.avgpool.register_forward_hook(_hook)
+    elif isinstance(model, DINOv2Classifier):
+        handle = model.encoder.layernorm.register_forward_hook(_hook)
     elif isinstance(model, CvTClassifier):
         handle = model.base.cvt.encoder.stages[-1].register_forward_hook(_hook)
     elif isinstance(model, AudioMAEClassifier):
