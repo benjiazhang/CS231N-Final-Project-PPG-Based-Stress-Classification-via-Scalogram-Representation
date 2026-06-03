@@ -1,6 +1,6 @@
 import modal
 
-app = modal.App("audiomae-pipeline")
+app = modal.App("efficientnet-pipeline")
 
 volume = modal.Volume.from_name("stress-data")
 
@@ -9,8 +9,6 @@ image = (
     .pip_install(
         "torch",
         "torchvision",
-        "timm",
-        "huggingface_hub",
         "numpy",
         "pandas",
         "scikit-learn",
@@ -31,7 +29,7 @@ def run(phase2_blocks: int = 0, full_finetune: bool = False, skip_cv: bool = Fal
     import full_pipeline_all_models as pipeline
 
     pipeline.main(
-        models=["audiomae"],
+        models=["efficientnet"],
         stages=["test", "loso"] if skip_cv else ["cv", "test", "loso"],
         phase2_blocks=phase2_blocks,
         full_finetune=full_finetune if full_finetune else None,

@@ -731,10 +731,16 @@ def final_test(spec, best_params, splits, out_dir, phase1_ckpt=None):
                        f"{spec.name} — Per-subject test accuracy")
 
     # Grad-CAM on test set (EfficientNet and CvT only)
-    _run_gradcam_if_supported(model, spec, Xte, yte, ste, "test", out_dir)
+    try:
+        _run_gradcam_if_supported(model, spec, Xte, yte, ste, "test", out_dir)
+    except Exception as e:
+        print(f"  [GradCAM] Failed (non-fatal): {e}")
 
     # t-SNE of test embeddings
-    _plot_tsne(model, spec, Xte_p, yte, ste, out_dir)
+    try:
+        _plot_tsne(model, spec, Xte_p, yte, ste, out_dir)
+    except Exception as e:
+        print(f"  [t-SNE] Failed (non-fatal): {e}")
 
     del model
     if DEVICE == "cuda":
@@ -1017,6 +1023,9 @@ def _get_gradcam(model, model_key):
 
 def _save_gradcam_figure(raw_img, cam, true_label, pred_label, prob_stress, out_path):
     import matplotlib.cm as mplcm
+    # raw_img may be (H, W, C) channels-last or (C, H, W) channels-first — normalize to (C, H, W)
+    if raw_img.ndim == 3 and raw_img.shape[-1] in (1, 3):
+        raw_img = raw_img.transpose(2, 0, 1)  # (H, W, C) -> (C, H, W)
     # raw_img: (C, H, W) in [0,1]; show first channel for grayscale
     img_hw = raw_img[0] if raw_img.shape[0] == 1 else raw_img.transpose(1, 2, 0)
     heatmap = mplcm.jet(cam)[..., :3]
@@ -1169,7 +1178,7 @@ def _plot_tsne(model, spec, Xp, y, subjects, out_dir):
 # ══════════════════════════════════════════════════════════════════════════════
 def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
          full_finetune=None, quick=None, out_root=None, phase1_out_root=None,
-         train_path=None, val_path=None, test_path=None):
+         train_path=None, val_path=None, test_path=None, commit_fn=None):
     """
     Run the pipeline. All args default to the module-level CONFIG values, so
     `main()` with no args runs every stage for every model. The CLI (see
@@ -1248,6 +1257,7 @@ def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
         bp_path = os.path.join(out_dir, "best_params.json")
         if run_cv:
             best_params = cv_sweep(spec, Xtv, ytv, stv, out_dir, phase1_ckpt=phase1_ckpt)
+            if commit_fn: commit_fn()   # save CV results immediately
         elif os.path.exists(bp_path):
             best_params = json.load(open(bp_path))
             print(f"  Loaded best params: {best_params}")
@@ -1261,10 +1271,12 @@ def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
         # Stage 2 — test eval
         if run_test:
             model_summary["test"] = final_test(spec, best_params, splits, out_dir, phase1_ckpt=phase1_ckpt)
+            if commit_fn: commit_fn()   # save test results immediately
 
         # Stage 3 — LOSO
         if run_loso:
             model_summary["loso"] = loso(spec, best_params, Xall, yall, sall, out_dir, phase1_ckpt=phase1_ckpt)
+            if commit_fn: commit_fn()   # save LOSO results immediately
 
         overall[key] = model_summary
         with open(os.path.join(out_dir, "summary.json"), "w") as f:

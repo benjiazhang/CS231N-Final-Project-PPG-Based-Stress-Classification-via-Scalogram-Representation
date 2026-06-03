@@ -26,33 +26,28 @@ image = (
     timeout=60 * 60 * 24,
     volumes={"/data": volume},
 )
-def run(phase2_blocks: int = 0, full_finetune: bool = False):
+def run(phase2_blocks: int = 0, full_finetune: bool = False, skip_cv: bool = False):
     import full_pipeline_all_models as pipeline
-
-    if full_finetune:
-        phase_label = "fullft"
-    elif phase2_blocks > 0:
-        phase_label = "phase2"
-    else:
-        phase_label = "phase1"
 
     pipeline.main(
         models=["cvt"],
-        stages=["cv", "test", "loso"],
+        stages=["test", "loso"] if skip_cv else ["cv", "test", "loso"],
         phase2_blocks=phase2_blocks,
         full_finetune=full_finetune if full_finetune else None,
-        out_root=f"/data/results/cvt_{phase_label}",
-        phase1_out_root="/data/results/cvt_phase1",
+        out_root="/data/results/all_models",
+        phase1_out_root="/data/results/all_models",
         train_path="/data/data/trainSINGLE.npz",
         val_path="/data/data/valSINGLE.npz",
         test_path="/data/data/testSINGLE.npz",
+        commit_fn=volume.commit,
     )
-    volume.commit()
+    volume.commit()   # final commit
 
 
 @app.local_entrypoint()
-def main(phase2: bool = False, full_finetune: bool = False):
+def main(phase2: bool = False, full_finetune: bool = False, skip_cv: bool = False):
     run.remote(
         phase2_blocks=2 if phase2 else 0,
         full_finetune=full_finetune,
+        skip_cv=skip_cv,
     )
