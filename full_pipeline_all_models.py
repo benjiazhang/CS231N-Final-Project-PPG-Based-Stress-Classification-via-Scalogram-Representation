@@ -1168,7 +1168,8 @@ def _plot_tsne(model, spec, Xp, y, subjects, out_dir):
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
-         full_finetune=None, quick=None, out_root=None, train_path=None, val_path=None, test_path=None):
+         full_finetune=None, quick=None, out_root=None, phase1_out_root=None,
+         train_path=None, val_path=None, test_path=None):
     """
     Run the pipeline. All args default to the module-level CONFIG values, so
     `main()` with no args runs every stage for every model. The CLI (see
@@ -1180,8 +1181,9 @@ def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
     stages = stages or STAGES
     if cv_folds      is not None: CV_FOLDS        = cv_folds
     if phase2_blocks is not None: PHASE2_BLOCKS   = phase2_blocks
-    if full_finetune is not None: FULL_FINETUNE   = full_finetune
-    if quick         is not None: QUICK_TEST      = quick
+    if full_finetune    is not None: FULL_FINETUNE    = full_finetune
+    if phase1_out_root  is not None: PHASE1_OUT_ROOT  = phase1_out_root
+    if quick            is not None: QUICK_TEST       = quick
     if out_root      is not None: OUT_ROOT      = out_root
     if train_path    is not None: TRAIN_PATH    = train_path
     if val_path      is not None: VAL_PATH      = val_path

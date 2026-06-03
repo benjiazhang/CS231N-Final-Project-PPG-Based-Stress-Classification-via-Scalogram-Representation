@@ -42,6 +42,7 @@ def run(phase2_blocks: int = 0, full_finetune: bool = False):
         phase2_blocks=phase2_blocks,
         full_finetune=full_finetune if full_finetune else None,
         out_root=f"/data/results/cvt_{phase_label}",
+        phase1_out_root="/data/results/cvt_phase1",
         train_path="/data/data/trainSINGLE.npz",
         val_path="/data/data/valSINGLE.npz",
         test_path="/data/data/testSINGLE.npz",
