@@ -2,8 +2,8 @@
 train_all_models.py
 ====================
 
-Unified training / evaluation pipeline for the three project models
-(EfficientNet-B0, CvT-13, AudioMAE) on the pooled WESAD + UBFC-Phys
+Unified training / evaluation pipeline for the four project models
+(EfficientNet-B0, DINOv2-Small, CvT-13, AudioMAE) on the pooled WESAD + UBFC-Phys
 scalogram dataset.
 
 For EACH selected model the pipeline runs three stages:
@@ -30,6 +30,7 @@ Data contract (produced by pool_datasets.py):
 Each model declares its own input size, channel count and normalization, so
 the same data array is reshaped appropriately per model:
     EfficientNet-B0 : 224x224, 3ch, ImageNet norm
+    DINOv2-Small    : 224x224, 3ch, ImageNet norm
     CvT-13          : 224x224, 3ch, ImageNet norm
     AudioMAE        : 128x128, 1ch, dataset standardization  (pluggable)
 
@@ -354,6 +355,7 @@ REGISTRY: dict[str, ModelSpec] = {
     ),
     "dinov2": ModelSpec(
        name="DINOv2-Small",
+       key="dinov2",
        builder=DINOv2Classifier,
        input_size=224, in_channels=3,
        mean=IMAGENET_MEAN, std=IMAGENET_STD,
@@ -362,7 +364,7 @@ REGISTRY: dict[str, ModelSpec] = {
            "batch_size":   [8, 16],
            "weight_decay": [1e-5, 1e-4],
            "dropout":      [0.2, 0.3],
-           "epochs":       [10],
+           "epochs":       [30],
        },
     ),
     
