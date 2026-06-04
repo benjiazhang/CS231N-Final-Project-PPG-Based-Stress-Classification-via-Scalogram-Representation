@@ -553,11 +553,13 @@ def build(spec, dropout, pretrained=True, phase2_blocks=0, phase1_ckpt=None):
 
 
 def fit(model, train_loader, criterion, lr, epochs, weight_decay,
-        val_loader=None, patience=None, verbose=False):
+        val_loader=None, patience=None, verbose=False, train_metrics_loader=None):
     """
     Train `model`. If val_loader is given, checkpoint the best val-F1 state in
     memory and (optionally) early-stop. Returns (model, best_f1, history).
     history is a list of dicts with per-epoch train/val metrics.
+    If train_metrics_loader is given, compute train metrics (AUROC, F1, etc.)
+    on that loader each epoch (used in Stage 2 for honest training curves).
     """
     opt = torch.optim.AdamW(model.trainable_params(), lr=lr, weight_decay=weight_decay)
     best_f1, best_state, no_improve = -1.0, None, 0
@@ -566,6 +568,12 @@ def fit(model, train_loader, criterion, lr, epochs, weight_decay,
     for ep in range(1, epochs + 1):
         tr_loss = train_one_epoch(model, train_loader, opt, criterion)
         row = {"epoch": ep, "train_loss": tr_loss}
+
+        if train_metrics_loader is not None:
+            yl, yp, pr = predict(model, train_metrics_loader)
+            tm = compute_metrics(yl, yp, pr)
+            row.update({f"train_{k}": v for k, v in tm.items()})
+
         if val_loader is not None:
             yl, yp, pr = predict(model, val_loader)
             vm = compute_metrics(yl, yp, pr)
@@ -714,6 +722,7 @@ def final_test(spec, best_params, splits, out_dir, phase1_ckpt=None):
         weight_decay=float(best_params["weight_decay"]),
         val_loader=val_loader_curves,
         verbose=True,
+        train_metrics_loader=train_loader,
     )
     torch.save(model.state_dict(), os.path.join(out_dir, "final_model.pt"))
 
@@ -900,28 +909,25 @@ def _per_subject_table(labels, preds, probs, subjects, csv_path, png_path, title
 # ══════════════════════════════════════════════════════════════════════════════
 def _plot_training_curves(history, model_name, out_dir):
     df = pd.DataFrame(history)
-    metrics = [
-        ("train_loss",    "val_loss",         "Loss"),
-        ("val_f1",        None,               "F1"),
-        ("val_balanced_acc", None,            "Balanced Accuracy"),
-        ("val_sensitivity",  None,            "Sensitivity"),
-        ("val_specificity",  None,            "Specificity"),
-        ("val_auroc",    None,                "AUROC"),
+    # Each tuple: (col_to_plot, label, title)
+    panels = [
+        ("train_loss",         "train+val", "Loss"),
+        ("train_f1",           "train+val", "F1"),
+        ("train_balanced_acc", "train+val", "Balanced Accuracy"),
+        ("train_sensitivity",  "train+val", "Sensitivity"),
+        ("train_specificity",  "train+val", "Specificity"),
+        ("train_auroc",        "train+val", "AUROC"),
     ]
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
     epochs = df["epoch"].values
-    for ax, (train_key, val_key, title) in zip(axes.flat, metrics):
-        if train_key in df.columns:
-            ax.plot(epochs, df[train_key], label="train", alpha=0.7, linestyle="--")
-        if val_key and val_key in df.columns:
-            ax.plot(epochs, df[val_key], label="val")
-        elif train_key.startswith("val_") and train_key in df.columns:
-            ax.plot(epochs, df[train_key], label="val")
+    for ax, (col, label, title) in zip(axes.flat, panels):
+        if col in df.columns:
+            ax.plot(epochs, df[col], label=label, color="steelblue", lw=2)
         ax.set_title(title, fontsize=10)
         ax.set_xlabel("Epoch")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
-    plt.suptitle(f"{model_name} — Training Curves", fontweight="bold")
+    plt.suptitle(f"{model_name} — Training Curves (train+val set)", fontweight="bold")
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, "training_curves.png"), dpi=150)
     plt.close()
