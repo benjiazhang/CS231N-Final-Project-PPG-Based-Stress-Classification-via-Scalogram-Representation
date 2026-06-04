@@ -96,7 +96,7 @@ FULL_FINETUNE = False   # True = unfreeze entire backbone (overrides PHASE2_BLOC
 # Sequential fine-tuning: when PHASE2_BLOCKS > 0, phase 2 loads the phase 1
 # checkpoint (final_model.pt from phase 1 out_dir) instead of fresh ImageNet weights.
 # Phase 2 CV sweeps lr only (other hyperparams inherited from phase 1).
-PHASE1_OUT_ROOT = os.path.join("results", "all_models")  # where phase 1 saved final_model.pt
+PHASE1_OUT_ROOT = os.path.join("/stress_data", "results", "all_models")  # where phase 1 saved final_model.pt
 PHASE2_LR_GRID  = [1e-5, 3e-5, 1e-4]   # lower lrs to avoid destroying pretrained weights
 
 # Debug: subsample subjects to make a fast end-to-end smoke test
@@ -606,18 +606,27 @@ def cv_sweep(spec, X, y, subjects, out_dir, phase1_ckpt=None):
     #phase1_ckpt = os.path.join(PHASE1_OUT_ROOT, spec.key, "final_model.pt") if is_phase2 else None
 
     if is_phase2:
+        # Load phase 1 best params as the base, sweep only lr
+        phase1_bp_path = os.path.join(PHASE1_OUT_ROOT, spec.key + "_phase1", "best_params.json")
+        if os.path.exists(phase1_bp_path):
+            with open(phase1_bp_path) as f:
+                phase1_params = json.load(f)
+            print(f"  Phase 2 mode: inheriting phase 1 params from {phase1_bp_path}")
+            print(f"  Phase 1 params: {phase1_params}")
+        else:
+            # Fallback: use first value of each grid param
+            phase1_params = {k: v[0] for k, v in spec.grid.items()}
+            print(f"  WARNING: phase 1 best_params.json not found at {phase1_bp_path}")
+            print(f"  Falling back to grid defaults: {phase1_params}")
+
         grid = {
             "lr":           PHASE2_LR_GRID,
-            "batch_size":   [spec.grid["batch_size"][0]],
-            "weight_decay": [spec.grid["weight_decay"][0]],
-            "dropout":      [spec.grid["dropout"][0]],
-            "epochs":       spec.grid["epochs"],
+            "batch_size":   [phase1_params["batch_size"]],
+            "weight_decay": [phase1_params["weight_decay"]],
+            "dropout":      [phase1_params["dropout"]],
+            "epochs":       [phase1_params["epochs"]],
         }
-        print(f"  Phase 2 mode: sweeping lr only {PHASE2_LR_GRID}")
-        if phase1_ckpt and os.path.exists(phase1_ckpt):
-            print(f"  Loading phase 1 checkpoint: {phase1_ckpt}")
-        else:
-            print(f"  WARNING: phase 1 checkpoint not found at {phase1_ckpt} — starting from ImageNet weights")
+        print(f"  Sweeping lr only: {PHASE2_LR_GRID}")
     else:
         grid = spec.grid
 
@@ -1242,7 +1251,13 @@ def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
     for key in models:
         spec = REGISTRY[key]
         
-        phase_suffix = f"_phase2_blocks{PHASE2_BLOCKS}" if PHASE2_BLOCKS > 0 else "_phase1"
+        if FULL_FINETUNE:
+            phase_suffix = "_full_finetune"
+        elif PHASE2_BLOCKS > 0:
+            phase_suffix = f"_phase2_blocks{PHASE2_BLOCKS}"
+        else:
+            phase_suffix = "_phase1"
+            
         out_dir = os.path.join(OUT_ROOT, key + phase_suffix)
         os.makedirs(out_dir, exist_ok=True)
         
