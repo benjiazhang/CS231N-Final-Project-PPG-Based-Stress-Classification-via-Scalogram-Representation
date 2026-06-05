@@ -1295,9 +1295,17 @@ def main(models=None, stages=None, cv_folds=None, phase2_blocks=None,
             if commit_fn: commit_fn()   # save test results immediately
 
         # Stage 3 — LOSO
+        # Skipped for phase 2: the phase 1 checkpoint was trained on a fixed
+        # train+val subset, so held-out subjects in LOSO may have been seen
+        # during phase 1 training — making phase 2 LOSO estimates optimistic.
+        # LOSO is only reported for phase 1 (ImageNet-initialized) runs.
         if run_loso:
-            model_summary["loso"] = loso(spec, best_params, Xall, yall, sall, out_dir, phase1_ckpt=phase1_ckpt)
-            if commit_fn: commit_fn()   # save LOSO results immediately
+            if PHASE2_BLOCKS > 0 or FULL_FINETUNE:
+                print("  [LOSO] Skipping — not valid for phase 2 / full fine-tune runs "
+                      "(phase 1 checkpoint may have seen held-out subjects).")
+            else:
+                model_summary["loso"] = loso(spec, best_params, Xall, yall, sall, out_dir, phase1_ckpt=phase1_ckpt)
+                if commit_fn: commit_fn()
 
         overall[key] = model_summary
         with open(os.path.join(out_dir, "summary.json"), "w") as f:
