@@ -712,15 +712,11 @@ def final_test(spec, best_params, splits, out_dir, phase1_ckpt=None):
     model = build(spec, float(best_params["dropout"]), pretrained=True,
                   phase2_blocks=PHASE2_BLOCKS, phase1_ckpt=phase1_ckpt)
 
-    # Use val loader for training curves (train on dev, monitor val separately)
-    Xva_p = preprocess(Xva, spec)
-    val_loader_curves = make_loader(Xva_p, yva, bs, False)
-
     model, _, history = fit(
         model, train_loader, criterion,
         lr=float(best_params["lr"]), epochs=int(best_params["epochs"]),
         weight_decay=float(best_params["weight_decay"]),
-        val_loader=val_loader_curves,
+        val_loader=None,
         verbose=True,
         train_metrics_loader=train_loader,
     )
