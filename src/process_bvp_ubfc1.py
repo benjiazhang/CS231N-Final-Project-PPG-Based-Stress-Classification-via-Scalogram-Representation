@@ -34,11 +34,13 @@ import matplotlib.pyplot as plt
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 
 BVP_DIR    = os.path.join(BASE_DIR, "bvp_ubfc")
-OUTPUT_DIR = os.path.join(BASE_DIR, "ubfc_cwt")
+OUTPUT_DIR = os.path.join(BASE_DIR, "ubfc_cwtSINGLE")
 FS         = 64.0
 IMG_SIZE   = 224
 WAVELET    = "morl"
 NUM_SCALES = 224
+WINDOW_SEC  = 30
+WINDOW_SAMP = int(FS * WINDOW_SEC)  # 1920 samples at 64 Hz
 # ─────────────────────────────────────────────────────────────────────────────
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -61,9 +63,9 @@ def compute_cwt(signal, fs=FS, num_scales=NUM_SCALES, img_size=IMG_SIZE):
     power = power - power.min()
     power = power / (power.max() + 1e-8)
 
-    colored = plt.cm.viridis(power)[:, :, :3]
+    # colored = plt.cm.viridis(power)[:, :, :3]
 
-    return colored.astype(np.float32)
+    return power[:,:, np.newaxis].astype(np.float32)
 
 
 def parse_subject_trial(filename):  # NEW
@@ -105,59 +107,80 @@ def main():
         return
 
     print(f"Found {len(csv_files)} BVP files\n")
-
+    os.makedirs(os.path.join(OUTPUT_DIR, "cwtFiles"), exist_ok=True)
+    
     all_arrays = []
     all_labels = []
     all_names  = []
-    all_subjects = []   # NEW
-    all_trial_ids = []  # NEW
+    all_subjects = [] 
+    all_trial_ids = [] 
     label_rows = []
+    all_window_ids = []
 
     for i, filepath in enumerate(csv_files):
         basename = os.path.splitext(os.path.basename(filepath))[0]
 
-        subject_id, trial_id = parse_subject_trial(filepath)  # NEW
-        label = get_label_from_trial(trial_id)                # CHANGED
-
-        print(
-            f"[{i+1}/{len(csv_files)}] {basename}  "
-            f"subject={subject_id}  trial=T{trial_id}  label={label}",
-            end="  "
-        )
+        subject_id, trial_id = parse_subject_trial(filepath)
+        label = get_label_from_trial(trial_id)
 
         try:
-            signal  = load_bvp(filepath)
-            cwt_img = compute_cwt(signal)
+            signal = load_bvp(filepath)
 
-            npy_path = os.path.join(OUTPUT_DIR, f"cwtFiles/{basename}.npy")
-            np.save(npy_path, cwt_img)
+            n_windows = len(signal) // WINDOW_SAMP
+            leftover = len(signal) % WINDOW_SAMP
 
-            all_arrays.append(cwt_img)
-            all_labels.append(label)
-            all_names.append(basename)
-            all_subjects.append(subject_id)    # NEW
-            all_trial_ids.append(trial_id)     # NEW
+            print(
+                f"[{i+1}/{len(csv_files)}] {basename} "
+                f"subject={subject_id} trial=T{trial_id} label={label} "
+                f"windows={n_windows} leftover_samples={leftover}"
+            )
 
-            label_rows.append({                # CHANGED
-                "filename": basename,
-                "label": label,
-                "subject_id": subject_id,
-                "trial_id": trial_id,
-            })
+            for w in range(n_windows):
+                start = w * WINDOW_SAMP
+                end = start + WINDOW_SAMP
 
-            print(f"saved  shape={cwt_img.shape}  samples={len(signal)}")
+                signal_window = signal[start:end]
+                cwt_img = compute_cwt(signal_window)
+
+                win_name = f"{basename}_win{w:04d}"
+
+                npy_path = os.path.join(OUTPUT_DIR, "cwtFiles", f"{win_name}.npy")
+                np.save(npy_path, cwt_img)
+
+                all_arrays.append(cwt_img)
+                all_labels.append(label)
+                all_names.append(win_name)
+                all_subjects.append(subject_id)
+                all_trial_ids.append(trial_id)
+                all_window_ids.append(w)
+
+                label_rows.append({
+                    "filename": win_name,
+                    "label": label,
+                    "subject_id": subject_id,
+                    "trial_id": trial_id,
+                    "window_id": w,
+                    "start_sample": start,
+                    "end_sample": end,
+                })
 
         except Exception as e:
             print(f"ERROR: {e}")
 
     # ── Save combined dataset.npz ─────────────────────────────────────────────
+    if not all_arrays:
+        print("No valid 30-second windows were created.")
+        return
+    
     X = np.stack(all_arrays)
     y = np.array(all_labels)
-    subjects = np.array(all_subjects)      # NEW
-    trial_ids = np.array(all_trial_ids)    # NEW
-    filenames = np.array(all_names)        # NEW
-
-    npz_path = os.path.join(OUTPUT_DIR, "ubfc_dataset.npz")
+    subjects = np.array(all_subjects)
+    trial_ids = np.array(all_trial_ids)
+    filenames = np.array(all_names) 
+    window_ids = np.array(all_window_ids)
+    dataset    = np.array(["ubfc"] * len(y), dtype=str)
+    
+    npz_path = os.path.join(OUTPUT_DIR, "ubfc_datasetSINGLE.npz")
 
     np.savez_compressed(                   # CHANGED
         npz_path,
@@ -166,6 +189,8 @@ def main():
         filenames=filenames,
         subjects=subjects,
         trial_ids=trial_ids,
+        window_ids=window_ids,
+        dataset=dataset,
     )
 
     print(f"\nSaved dataset.npz  →  X: {X.shape}, y: {y.shape}")
@@ -173,7 +198,7 @@ def main():
     print(f"Stress (1): {y.sum()}  |  No-stress (0): {(y == 0).sum()}")
 
     # ── Save labels.csv ───────────────────────────────────────────────────────
-    csv_path = os.path.join(OUTPUT_DIR, "ubfc_labels.csv")
+    csv_path = os.path.join(OUTPUT_DIR, "ubfc_labelsSINGLE.csv")
     pd.DataFrame(label_rows).to_csv(csv_path, index=False)
 
     print(f"Saved labels.csv  →  {csv_path}")

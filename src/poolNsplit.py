@@ -134,12 +134,23 @@ def save_split(name, idx):
         "dataset": dataset[idx],
         "sample_id": sample_ids[idx],
     }).to_csv(out_csv, index=False)
+    
+    wesad_subjects = len(
+        np.unique(subjects[idx][dataset[idx] == "WESAD"])
+    )
+
+    ubfc_subjects = len(
+        np.unique(subjects[idx][dataset[idx] == "UBFC"])
+    )
 
     print(f"\n{name.upper()}")
     print("samples :", len(idx))
     print("subjects:", len(np.unique(subjects[idx])))
     print("class counts:", np.bincount(y[idx].astype(int)))
     print("datasets:", pd.Series(dataset[idx]).value_counts().to_dict())
+    print("subjects by dataset:")
+    print(f"  WESAD: {wesad_subjects}")
+    print(f"  UBFC : {ubfc_subjects}")
     print("saved:", out_npz)
     print("saved:", out_csv)
 

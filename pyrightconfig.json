@@ -1,0 +1,12 @@
+{
+  "venvPath": ".",
+  "venv": "cs231final.venv",
+  "typeCheckingMode": "off",
+  "reportGeneralTypeIssues": "none",
+  "reportArgumentType": "none",
+  "reportAssignmentType": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportCallIssue": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportOperatorIssue": "none"
+}
