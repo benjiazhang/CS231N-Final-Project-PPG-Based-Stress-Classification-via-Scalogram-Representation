@@ -5,7 +5,9 @@ This is motivated by the plethora of applications of stress detection in clinica
 # Key Idea
 
 raw 1D BVP window  ──CWT──▶  2D scalogram  ──▶  pretrained backbone (frozen)  ──▶  stress / no-stress
-                    └─────────────────────── vs. ───────────────────────┘
+
+                                which we compare against: 
+                                
 raw 1D BVP window  ────────────────────────────▶  sequence model        ──▶  stress / no-stress
 
 Our input is a 30-second window of single-channel wrist BVP, sampled at 64 Hz (1,920 samples) and we output a binary prediction of stress (1) or no-stress (0).
