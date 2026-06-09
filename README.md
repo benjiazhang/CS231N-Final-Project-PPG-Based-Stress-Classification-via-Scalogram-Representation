@@ -1,6 +1,14 @@
 # CS231N-Final-Project-PPG-Based-Stress-Classification-via-Scalogram-Representation
-Wrist PPG-Based Stress Classification via Scalogram Representations and Transfer Learning
+This repository is for our CS231n final project. We study binary stress classification from wrist photoplethysmography (PPG) blood volume pulse (BVP) signals using  computer vision problem. Each 30-second BVP window is converted into a 2D continuous-wavelet-transform (CWT) scalogram and classified using transfer learning from pretrained vision, audio, and time-series foundation models. We benchmark these scalogram-based models against models that operate directly on the raw 1D signal, to test whether the signal-to-image step actually helps.
+This is motivated by the plethora of applications of stress detection in clinical settings such as its implications in mental health settings and detecting cancer related fatigue. 
 
+# Key Idea
+
+raw 1D BVP window  ──CWT──▶  2D scalogram  ──▶  pretrained backbone (frozen)  ──▶  stress / no-stress
+                    └─────────────────────── vs. ───────────────────────┘
+raw 1D BVP window  ────────────────────────────▶  sequence model        ──▶  stress / no-stress
+
+Our input is a 30-second window of single-channel wrist BVP, sampled at 64 Hz (1,920 samples) and we output a binary prediction of stress (1) or no-stress (0).
 
 # Output Files
 
@@ -11,7 +19,131 @@ This directory contains training, evaluation, and explainability outputs generat
 * `best_model_phase1.pt` — Best Phase 1 model (classifier head only).
 * `best_model_phase2.pt` — Best Phase 2 model (head + partially unfrozen backbone, if enabled).
 
-Models are selected using the highest validation F1 score.
+# Repository Structure 
+.
+├── src/
+│   │  # ── Preprocessing: scalogram (image) pathway ──
+│   ├── process_bvp_wesad.py            # WESAD BVP → CWT scalograms (.npz)
+│   ├── process_bvp_ubfc1.py            # UBFC  BVP → CWT scalograms (.npz)
+│   ├── split_wesad.py                  # WESAD per-subject train/val/test split
+│   ├── split_ubfc2.py                  # UBFC  per-subject train/val/test split
+│   ├── pool_datasets.py                # Pool WESAD + UBFC (+100 offset on UBFC subject IDs)
+│   │
+│   │  # ── Preprocessing: raw-signal (baseline) pathway ──
+│   ├── process_ubfc_baselines.py       # UBFC raw 1D BVP windows for sequence models
+│   ├── poolNsplit.py                   # Pool + split for the raw-signal baselines
+│   │
+│   │  # ── Training & evaluation ──
+│   ├── full_pipeline_all_models.py     # Unified train + evaluation across all 7 models
+│   ├── full_pipeline_all_models_CV_SW.py  # Subject-grouped CV hyperparameter sweep
+│   ├── baselines.py                    # From-scratch sequence baselines (1D CNN)
+│   │
+│   │  # ── Modal cloud-GPU wrappers ──
+│   ├── modal_full_pipeline.py          # Run the full pipeline on a cloud GPU
+│   ├── modal_efficientnet.py
+│   ├── modal_cvt.py
+│   ├── modal_dinov2.py
+│   ├── modal_audiomae.py
+│   └── modal_baselines.py
+│
+├── PROCESSING_README.md                # Explaination of every preprocessing choice
+├── requirements.txt
+├── pyrightconfig.json
+└── README.md
+
+## Usage
+
+All scripts live in `src/`.
+
+### 1. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Download datasets
+
+Place the raw data as:
+
+```
+WESAD/S2/S2.pkl, WESAD/S3/S3.pkl, ...
+bvp_ubfc/bvp_s1_T1.csv, bvp_ubfc/bvp_s1_T2.csv, ...
+```
+
+### 3. Build the scalogram (image) datasets
+
+```bash
+# BVP → CWT scalograms
+python src/process_bvp_wesad.py --wesad_dir ./WESAD --out_dir ./wesad_cwt
+python src/process_bvp_ubfc1.py
+
+# per-subject train/val/test splits, then pool
+python src/split_wesad.py
+python src/split_ubfc2.py
+python src/pool_datasets.py
+# → data/trainSINGLE.npz, data/valSINGLE.npz, data/testSINGLE.npz
+```
+
+### 4. Build the raw-signal datasets (for the sequence baselines)
+
+```bash
+python src/process_ubfc_baselines.py
+python src/poolNsplit.py
+```
+
+### 5. Select hyperparameters, then train and evaluate
+
+```bash
+python src/full_pipeline_all_models_CV_SW.py   # subject-grouped CV sweep
+python src/full_pipeline_all_models.py         # train + evaluate all 7 models
+```
+
+`full_pipeline_all_models.py` runs the scalogram backbones and the raw-signal models through the same selection and evaluation protocol. The standalone `baselines.py` trains the from-scratch sequence models (LSTM, 1D CNN) on their own if you want to iterate on just those.
+
+### Running on Modal (cloud GPU)
+
+Each backbone has a Modal wrapper, plus one for the full pipeline:
+
+```bash
+modal run src/modal_full_pipeline.py
+modal run src/modal_efficientnet.py
+modal run src/modal_cvt.py
+modal run src/modal_dinov2.py
+modal run src/modal_audiomae.py
+modal run src/modal_baselines.py
+```
+
+## Datasets
+
+Two publicly available wearable datasets, both recorded with the Empatica E4 wristband, pooled into a single set of **71 subjects / 2,085 windows**.
+
+| Dataset | Subjects | Windows | Stress | Non-stress | Protocol |
+| --- | --- | --- | --- | --- | --- |
+| [WESAD](https://archive.ics.uci.edu/dataset/465/wesad+wearable+stress+and+affect+detection) | 15 | 1,077 | 322 | 755 | Trier Social Stress Test |
+| [UBFC-Phys](https://sites.google.com/view/ybenezeth/ubfc-phys) | 56 | 1,008 | 672 | 336 | 3-phase social stress |
+| **Pooled** | **71** | **2,085** | **994** | **1,091** | — |
+
+**Label mapping**
+- WESAD: stress = label 2; non-stress = labels 1 (baseline) + 3 (amusement); labels 0, 4–7 discarded.
+- UBFC-Phys: T1 (rest) = non-stress; T2 (speech prep) + T3 (arithmetic) = stress.
+
+> The datasets are **not redistributed** here. Download them from the official sources above and place them as described in [Usage](#usage).
+
+## Models
+
+Seven models across two categories:
+
+**Image pathway (CWT scalograms)**
+- **EfficientNet-B0** — convolutional CNN backbone (ImageNet-pretrained)
+- **CvT-13** — convolution–transformer hybrid (ImageNet-pretrained)
+- **DINOv2-Small** — self-supervised vision transformer
+- **AudioMAE** — masked-autoencoder transformer pretrained on AudioSet spectrograms
+
+**Sequence pathway (raw 1D BVP)**
+- **MOMENT** — pretrained time-series foundation model (frozen encoder + linear head)
+- **LSTM** — 2-layer bidirectional LSTM, trained from scratch
+- **1D CNN** — 4-block convolutional network, trained from scratch
+
 
 ## Training History
 
@@ -236,3 +368,7 @@ Because the task is binary stress classification and class imbalance may be pres
 * All windows from a given subject remain within the same fold.
 * Validation metrics are recorded from the epoch with the highest validation F1 score within each fold.
 * The final hyperparameter ranking is based on the mean fold performance reported in `cv_summary.csv`.
+
+## Acknowledgments
+
+Developed for Stanford CS231N. Built on PyTorch, torchvision, timm, and scikit-learn, with cloud GPU training via Modal.
